@@ -558,8 +558,17 @@ window.send=async()=>{
       }
     }catch(e){console.error('Media upload failed',e);toast(`❌ Не удалось загрузить файл: ${e.code||e.message||'проверьте доступ к Firebase Storage'}`,6000);return;}
   }
+  let messageText=txt;
+  const urlPattern=/https?:\/\/[^\s<>"']+/gi; let match;
+  while((match=urlPattern.exec(txt))){
+    let url=match[0];while(/[),.!?;:]$/.test(url))url=url.slice(0,-1);
+    let pathname='';try{pathname=decodeURIComponent(new URL(url).pathname).toLowerCase();}catch{}
+    const kind=/\.(png|jpe?g|gif|webp|avif|bmp|tiff?)$/i.test(pathname)?'image':
+      /\.(mp4|webm|ogg|mov|m4v)$/i.test(pathname)?'video':'';
+    if(kind&&safeUrl(url)){media.push({url,type:kind});messageText=messageText.replace(match[0],' ').replace(/\s{2,}/g,' ').trim();}
+  }
   const path=curType==='general'?'messages/general':curType==='room'?`messages/rooms/${curCh}`:`messages/dms/${curCh}`;
-  const data={uid:me.uid,sender:me.name,ts:Date.now(),text:txt};
+  const data={uid:me.uid,sender:me.name,ts:Date.now(),text:messageText};
   if(media.length)data.media=media;
   await push(ref(db,path),data);
   files=[]; g('chips').innerHTML='';
@@ -601,6 +610,10 @@ window.hFiles=flist=>{
     const ch=document.createElement('div'); ch.className='chip';
     const ico=kind==='image'?'🖼️':kind==='video'?'🎬':'🎵';
     ch.innerHTML=`${ico} ${esc(f.name.slice(0,18))} <button class="cx" onclick="rmF(${files.length-1},this)">×</button>`;
+    if(kind==='image'){
+      const preview=document.createElement('img');preview.src=URL.createObjectURL(f);preview.alt='Предпросмотр';
+      preview.style.cssText='width:32px;height:32px;object-fit:cover;border-radius:4px;margin-right:3px';ch.prepend(preview);
+    }
     g('chips').appendChild(ch);
   }
   g('fi').value='';
@@ -614,9 +627,15 @@ function mediaKind(file){
 }
 g('ca').addEventListener('paste',e=>{
   const clip=e.clipboardData; if(!clip)return;
-  const pasted=[...clip.items].filter(x=>x.kind==='file'&&x.type.startsWith('image/')).map(x=>x.getAsFile()).filter(Boolean);
+  const pasted=[...clip.items].filter(x=>x.kind==='file'&&(!x.type||x.type.startsWith('image/'))).map(x=>x.getAsFile()).filter(Boolean);
   const chosen=pasted.length?pasted:[...clip.files].filter(f=>mediaKind(f)==='image');
-  if(chosen.length){e.preventDefault();e.stopPropagation();hFiles(chosen);toast(`🖼️ Изображение добавлено (${chosen.length})`);}
+  if(chosen.length){e.preventDefault();e.stopPropagation();hFiles(chosen);toast(`🖼️ Изображение добавлено (${chosen.length}). Нажмите ➤ для отправки.`);return;}
+  const html=clip.getData('text/html');
+  if(html){
+    const doc=new DOMParser().parseFromString(html,'text/html');
+    const dataImages=[...doc.images].map(img=>img.src).filter(src=>src.startsWith('data:image/'));
+    if(dataImages.length){e.preventDefault();e.stopPropagation();hFiles(dataImages.map((src,i)=>{const [meta,data]=src.split(',');const mime=(meta.match(/data:([^;]+)/)||[])[1]||'image/png';const bytes=Uint8Array.from(atob(data),c=>c.charCodeAt(0));return new File([bytes],`clipboard-image-${i+1}.${mime.split('/')[1]||'png'}`,{type:mime});}));toast(`🖼️ Изображение добавлено (${dataImages.length}). Нажмите ➤ для отправки.`);}
+  }
 });
 window.rmF=(i,btn)=>{files[i]=null;btn.parentElement.remove();files=files.filter(Boolean);};
 
