@@ -342,7 +342,7 @@ import {
   GoogleAuthProvider, signInWithPopup
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import {
-  getDatabase, ref, push, set, onValue, off, onChildAdded,
+  getDatabase, ref, push, set, update, onValue, off, onChildAdded,
   serverTimestamp, query, orderByChild, limitToLast, get, remove, onDisconnect
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 import {
@@ -370,6 +370,7 @@ const st    = getStorage(fbApp);
 
 let me=null, curCh=null, curType=null, msgsRef=null;
 let files=[], tTmo=null, pRoom=null;
+let audioCtx=null;
 
 // utils
 const g  = id => document.getElementById(id);
@@ -407,7 +408,7 @@ window.doUp=async()=>{
   try{
     const cred=await createUserWithEmailAndPassword(auth,login+'@chatwave.app',pass);
     await updateProfile(cred.user,{displayName:login});
-    await set(ref(db,`users/${cred.user.uid}`),{uid:cred.user.uid,name:login,online:true,at:serverTimestamp()});
+    await update(ref(db,`users/${cred.user.uid}`),{uid:cred.user.uid,name:login,online:true,at:serverTimestamp()});
     err.textContent='';
   }catch(e){err.textContent=fErr(e.code);}
 };
@@ -427,7 +428,7 @@ window.doG=async()=>{
     const cred=await signInWithPopup(auth,new GoogleAuthProvider());
     const u=cred.user;
     const name=(u.displayName||u.email.split('@')[0]).replace(/\s+/g,'_');
-    await set(ref(db,`users/${u.uid}`),{uid:u.uid,name,online:true,at:serverTimestamp()});
+    await update(ref(db,`users/${u.uid}`),{uid:u.uid,name,online:true,at:serverTimestamp()});
   }catch(e){g('le').textContent=fErr(e.code);}
 };
 
@@ -470,7 +471,18 @@ function openCh(id,type,title,icon,sub){
   if(msgsRef)off(msgsRef);
   const path=type==='general'?'messages/general':type==='room'?`messages/rooms/${id}`:`messages/dms/${id}`;
   msgsRef=query(ref(db,path),orderByChild('ts'),limitToLast(100));
-  onChildAdded(msgsRef,snap=>{renderMsg(snap.val(),c);c.scrollTop=c.scrollHeight;});
+  let ready=false; const pending=[]; const rendered=new Set();
+  const add=(snap,known=false)=>{
+    if(rendered.has(snap.key))return;
+    rendered.add(snap.key); const msg=snap.val(); renderMsg(msg,c);
+    if(!known&&msg.uid!==me?.uid)playMessageSound();
+    c.scrollTop=c.scrollHeight;
+  };
+  onChildAdded(msgsRef,snap=>{if(!ready)pending.push(snap);else add(snap,false);});
+  get(msgsRef).then(snap=>{
+    const known=new Set(Object.keys(snap.val()||{}));
+    pending.forEach(item=>add(item,known.has(item.key))); ready=true;
+  }).catch(()=>{pending.forEach(item=>add(item,true));ready=true;});
   listenTyping(id);
   if(window.innerWidth<=660) g('sb').classList.remove('open');
 }
@@ -482,17 +494,45 @@ function renderMsg(msg,c){
   const t=new Date(msg.ts).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
   let med='';
   (msg.media||[]).forEach(m=>{
-    if(m.type==='image')med+=`<img src="${m.url}" onclick="openLB('${m.url}')" loading="lazy">`;
-    else if(m.type==='video')med+=`<video src="${m.url}" controls></video>`;
-    else med+=`<audio src="${m.url}" controls></audio>`;
+    const url=safeUrl(m.url); if(!url)return;
+    if(m.type==='image')med+=`<img src="${url}" onclick="openLB(this.src)" loading="lazy">`;
+    else if(m.type==='video')med+=`<video src="${url}" controls playsinline preload="metadata"></video>`;
+    else med+=`<audio src="${url}" controls preload="metadata"></audio>`;
   });
+  const messageText=formatText(msg.text||'');
   const d=document.createElement('div'); d.className='msg'+(own?' ow':'');
   const bg=clr(msg.uid);
   d.innerHTML=`<div class="mava" style="background:${bg};color:#fff">${ini(msg.sender)}</div>
     <div class="mb"><div class="mm"><span class="mf">${esc(msg.sender)}</span><span>${t}</span></div>
-    <div class="bbl">${msg.text?esc(msg.text):''}${med}</div></div>`;
+    <div class="bbl">${messageText}${med}</div></div>`;
   c.appendChild(d);
 }
+
+function safeUrl(value){try{const u=new URL(value,location.href);return /^https?:$/.test(u.protocol)?esc(u.href):'';}catch{return ''}}
+function formatText(value){
+  const text=String(value||'');
+  return text.split(/(https?:\/\/[^\s<>]+)/g).map(part=>{
+    if(!/^https?:\/\//i.test(part))return esc(part);
+    const url=part.replace(/[),.!?]+$/,''); const tail=part.slice(url.length); const safe=safeUrl(url);
+    if(!safe)return esc(part);
+    const path=url.split(/[?#]/)[0].toLowerCase();
+    if(/\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(path))return `<a href="${safe}" target="_blank" rel="noopener"><img src="${safe}" loading="lazy" alt="Изображение"></a>${esc(tail)}`;
+    if(/\.(mp4|webm|ogg|mov|m4v)$/i.test(path))return `<video src="${safe}" controls playsinline preload="metadata"></video>${esc(tail)}`;
+    return `<a href="${safe}" target="_blank" rel="noopener">${esc(url)}</a>${esc(tail)}`;
+  }).join('').replace(/\n/g,'<br>');
+}
+function playMessageSound(){
+  try{if(!audioCtx||audioCtx.state==='closed')return; if(audioCtx.state==='suspended')return;
+    const osc=audioCtx.createOscillator(), gain=audioCtx.createGain();
+    osc.type='sine'; osc.frequency.value=660; gain.gain.setValueAtTime(0.0001,audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.035,audioCtx.currentTime+0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001,audioCtx.currentTime+0.16);
+    osc.connect(gain);gain.connect(audioCtx.destination);osc.start();osc.stop(audioCtx.currentTime+0.17);
+  }catch{}
+}
+function unlockAudio(){try{if(!audioCtx)audioCtx=new (window.AudioContext||window.webkitAudioContext)();if(audioCtx.state==='suspended')audioCtx.resume();}catch{}}
+document.addEventListener('pointerdown',unlockAudio,{once:true});
+document.addEventListener('keydown',unlockAudio,{once:true});
 
 // SEND
 window.send=async()=>{
@@ -504,7 +544,7 @@ window.send=async()=>{
     for(const f of files){
       try{
         const path=`media/${me.uid}/${Date.now()}_${Math.random().toString(36).slice(2)}.${f.name.split('.').pop()}`;
-        const r=sr(st,path); await uploadBytes(r,f);
+        const r=sr(st,path); await uploadBytes(r,f,{contentType:f.type||'application/octet-stream'});
         const url=await getDownloadURL(r);
         media.push({url,type:f.type.startsWith('image')?'image':f.type.startsWith('video')?'video':'audio'});
       }catch(e){toast('❌ Ошибка загрузки файла');}
@@ -553,6 +593,11 @@ window.hFiles=flist=>{
   }
   g('fi').value='';
 };
+g('mi').addEventListener('paste',e=>{
+  const items=[...(e.clipboardData?.items||[])];
+  const pasted=items.filter(x=>x.kind==='file'&&x.type.startsWith('image/')).map(x=>x.getAsFile()).filter(Boolean);
+  if(pasted.length){e.preventDefault();hFiles(pasted);}
+});
 window.rmF=(i,btn)=>{files[i]=null;btn.parentElement.remove();files=files.filter(Boolean);};
 
 // ROOMS
@@ -646,14 +691,15 @@ function oDMCh(id,u){openCh(id,'dm',u.name,'💬','Личные сообщени
 function ldUsers(){
   onValue(ref(db,'users'),snap=>{
     const users=snap.val()||{}; const l=g('ul'); l.innerHTML='';
-    Object.values(users).forEach(u=>{
+    Object.entries(users).forEach(([key,record])=>{
+      const u={...record,uid:record?.uid||key,name:record?.name||'Пользователь'};
       const el=document.createElement('div'); el.className='ui';
       el.innerHTML=`<div class="uav" style="background:${clr(u.uid)};color:#fff">${ini(u.name)}</div>
         <span class="un">${esc(u.name)}</span><div class="ud${u.online?' on':''}"></div>`;
       if(u.uid!==me.uid)el.onclick=()=>stDM(u);
       l.appendChild(el);
     });
-  });
+  },err=>{console.error('users listener failed',err);toast('Не удалось загрузить список пользователей');});
 }
 
 window.togUP=()=>g('up').classList.toggle('open');
