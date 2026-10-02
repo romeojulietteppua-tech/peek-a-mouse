@@ -279,7 +279,7 @@ body{font-family:'Outfit',sans-serif;background:var(--bg);color:var(--txt);displ
           <button class="ab2" onclick="document.getElementById('fi').click()" title="Файл">📎</button>
           <input id="fi" type="file" style="display:none" accept="image/*,video/*,audio/*" multiple onchange="hFiles(this.files)">
           <textarea id="mi" rows="1" placeholder="Написать сообщение..." onkeydown="onK(event)" oninput="grow(this);onT()"></textarea>
-          <button class="sb2" onclick="send()">➤</button>
+          <button class="sb2" id="sendBtn" onclick="send()">➤</button>
         </div>
       </div>
     </div>
@@ -542,6 +542,11 @@ document.addEventListener('keydown',unlockAudio,{once:true});
 
 // SEND
 window.send=async()=>{
+  const btn=g('sendBtn');if(btn.disabled)return;btn.disabled=true;btn.textContent='…';
+  try{await sendNow();}catch(e){console.error('Send failed',e);toast(`❌ Ошибка отправки: ${e.code||e.message||'неизвестная ошибка'}`,7000);}
+  finally{btn.disabled=false;btn.textContent='➤';}
+};
+async function sendNow(){
   const txt=g('mi').value.trim();
   if(!txt&&files.length===0)return;
   if(!me||!curType||!curCh)return toast('Сначала выберите чат');
@@ -553,7 +558,8 @@ window.send=async()=>{
         const kind=mediaKind(f); if(!kind)throw new Error(`Неизвестный тип файла: ${f.name}`);
         const ext=(f.name.split('.').pop()||kind).replace(/[^a-z0-9]/gi,'').toLowerCase()||kind;
         const path=`media/${me.uid}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
-        const r=sr(st,path); await uploadBytes(r,f,{contentType:f.type||({image:'image/jpeg',video:'video/mp4',audio:'audio/mpeg'}[kind])});
+        const fallbackType=mimeFor(f,kind);
+        const r=sr(st,path); await uploadBytes(r,f,{contentType:f.type||fallbackType});
         const url=await getDownloadURL(r); media.push({url,type:kind});
       }
     }catch(e){console.error('Media upload failed',e);toast(`❌ Не удалось загрузить файл: ${e.code||e.message||'проверьте доступ к Firebase Storage'}`,6000);return;}
@@ -570,7 +576,8 @@ window.send=async()=>{
   const path=curType==='general'?'messages/general':curType==='room'?`messages/rooms/${curCh}`:`messages/dms/${curCh}`;
   const data={uid:me.uid,sender:me.name,ts:Date.now(),text:messageText};
   if(media.length)data.media=media;
-  await push(ref(db,path),data);
+  try{await push(ref(db,path),data);}
+  catch(e){console.error('Message send failed',e);toast(`❌ Не удалось отправить сообщение: ${e.code||e.message||'ошибка Firebase Database'}`,7000);return;}
   files=[]; g('chips').innerHTML='';
   const prev=txt||'📎 файл';
   if(curType==='general'){const p=g('pg');if(p)p.textContent=prev;}
@@ -578,7 +585,7 @@ window.send=async()=>{
   else set(ref(db,`dms/${curCh}/lastMessage`),prev);
   g('mi').value=''; g('mi').style.height='';
   clrTyp();
-};
+}
 window.onK=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}};
 window.grow=el=>{el.style.height='auto';el.style.height=Math.min(el.scrollHeight,110)+'px';};
 
@@ -621,20 +628,33 @@ window.hFiles=flist=>{
 function mediaKind(file){
   const mime=(file.type||'').toLowerCase(),ext=(file.name||'').split('.').pop().toLowerCase();
   if(mime.startsWith('image/')||/^(png|jpe?g|gif|webp|avif|bmp|tiff?)$/.test(ext))return 'image';
-  if(mime.startsWith('video/')||/^(mp4|webm|ogg|mov|m4v|avi|mkv)$/.test(ext))return 'video';
+  if(mime.startsWith('video/')||/^(mp4|webm|ogg|mov|m4v)$/.test(ext))return 'video';
   if(mime.startsWith('audio/')||/^(mp3|wav|m4a|aac|flac|oga)$/.test(ext))return 'audio';
   return '';
 }
-g('ca').addEventListener('paste',e=>{
+function mimeFor(file,kind){
+  if(file.type)return file.type;
+  const ext=(file.name||'').split('.').pop().toLowerCase();
+  const types={jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp',avif:'image/avif',bmp:'image/bmp',tif:'image/tiff',tiff:'image/tiff',
+    mp4:'video/mp4',m4v:'video/mp4',mov:'video/quicktime',webm:'video/webm',ogg:'video/ogg',
+    mp3:'audio/mpeg',wav:'audio/wav',m4a:'audio/mp4',aac:'audio/aac',flac:'audio/flac',oga:'audio/ogg'};
+  return types[ext]||'application/octet-stream';
+}
+document.addEventListener('paste',e=>{
+  if(!g('ca').contains(e.target))return;
   const clip=e.clipboardData; if(!clip)return;
-  const pasted=[...clip.items].filter(x=>x.kind==='file'&&(!x.type||x.type.startsWith('image/'))).map(x=>x.getAsFile()).filter(Boolean);
-  const chosen=pasted.length?pasted:[...clip.files].filter(f=>mediaKind(f)==='image');
+  const pasted=[...(clip.items||[])].filter(x=>x.kind==='file'&&(!x.type||x.type.startsWith('image/'))).map(x=>x.getAsFile()).filter(Boolean);
+  const chosen=pasted.length?pasted:[...(clip.files||[])].filter(f=>mediaKind(f)==='image');
   if(chosen.length){e.preventDefault();e.stopPropagation();hFiles(chosen);toast(`🖼️ Изображение добавлено (${chosen.length}). Нажмите ➤ для отправки.`);return;}
   const html=clip.getData('text/html');
   if(html){
     const doc=new DOMParser().parseFromString(html,'text/html');
     const dataImages=[...doc.images].map(img=>img.src).filter(src=>src.startsWith('data:image/'));
     if(dataImages.length){e.preventDefault();e.stopPropagation();hFiles(dataImages.map((src,i)=>{const [meta,data]=src.split(',');const mime=(meta.match(/data:([^;]+)/)||[])[1]||'image/png';const bytes=Uint8Array.from(atob(data),c=>c.charCodeAt(0));return new File([bytes],`clipboard-image-${i+1}.${mime.split('/')[1]||'png'}`,{type:mime});}));toast(`🖼️ Изображение добавлено (${dataImages.length}). Нажмите ➤ для отправки.`);}
+    else {
+      const urls=[...doc.images].map(img=>img.src).filter(src=>/^https?:\/\//i.test(src)&&safeUrl(src));
+      if(urls.length){e.preventDefault();e.stopPropagation();g('mi').value=[g('mi').value.trim(),...urls].filter(Boolean).join('\n');g('mi').dispatchEvent(new Event('input',{bubbles:true}));toast(`🖼️ Ссылка на изображение добавлена. Нажмите ➤ для отправки.`);}
+    }
   }
 });
 window.rmF=(i,btn)=>{files[i]=null;btn.parentElement.remove();files=files.filter(Boolean);};
