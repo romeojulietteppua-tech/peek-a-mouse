@@ -511,15 +511,21 @@ function renderMsg(msg,c){
 function safeUrl(value){try{const u=new URL(value,location.href);return /^https?:$/.test(u.protocol)?esc(u.href):'';}catch{return ''}}
 function formatText(value){
   const text=String(value||'');
-  return text.split(/(https?:\/\/[^\s<>]+)/g).map(part=>{
-    if(!/^https?:\/\//i.test(part))return esc(part);
-    const url=part.replace(/[),.!?]+$/,''); const tail=part.slice(url.length); const safe=safeUrl(url);
-    if(!safe)return esc(part);
-    const path=url.split(/[?#]/)[0].toLowerCase();
-    if(/\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(path))return `<a href="${safe}" target="_blank" rel="noopener"><img src="${safe}" loading="lazy" alt="Изображение"></a>${esc(tail)}`;
-    if(/\.(mp4|webm|ogg|mov|m4v)$/i.test(path))return `<video src="${safe}" controls playsinline preload="metadata"></video>${esc(tail)}`;
-    return `<a href="${safe}" target="_blank" rel="noopener">${esc(url)}</a>${esc(tail)}`;
-  }).join('').replace(/\n/g,'<br>');
+  const urlPattern=/https?:\/\/[^\s<>"']+/gi; let html='',last=0,match;
+  while((match=urlPattern.exec(text))){
+    html+=esc(text.slice(last,match.index));
+    let url=match[0],tail='';
+    while(/[),.!?;:]$/.test(url)){tail=url.slice(-1)+tail;url=url.slice(0,-1);}
+    const safe=safeUrl(url);
+    if(!safe){html+=esc(match[0]);last=urlPattern.lastIndex;continue;}
+    let path='';try{path=decodeURIComponent(new URL(url).pathname).toLowerCase();}catch{}
+    if(/\.(png|jpe?g|gif|webp|avif|bmp|tiff?)$/i.test(path))html+=`<a class="media-link" href="${safe}" target="_blank" rel="noopener"><img src="${safe}" loading="lazy" alt="Изображение" onerror="this.closest('a').classList.add('media-link-failed')"></a>`;
+    else if(/\.(mp4|webm|ogg|mov|m4v)$/i.test(path))html+=`<video src="${safe}" controls playsinline preload="metadata"></video>`;
+    else html+=`<a href="${safe}" target="_blank" rel="noopener">${esc(url)}</a>`;
+    html+=esc(tail);last=urlPattern.lastIndex;
+  }
+  html+=esc(text.slice(last));
+  return html.replace(/\n/g,'<br>');
 }
 function playMessageSound(){
   try{if(!audioCtx||audioCtx.state==='closed')return; if(audioCtx.state==='suspended')return;
@@ -538,23 +544,25 @@ document.addEventListener('keydown',unlockAudio,{once:true});
 window.send=async()=>{
   const txt=g('mi').value.trim();
   if(!txt&&files.length===0)return;
+  if(!me||!curType||!curCh)return toast('Сначала выберите чат');
   let media=[];
   if(files.length>0){
-    toast('⬆️ Загружаю...');
-    for(const f of files){
-      try{
-        const path=`media/${me.uid}/${Date.now()}_${Math.random().toString(36).slice(2)}.${f.name.split('.').pop()}`;
-        const r=sr(st,path); await uploadBytes(r,f,{contentType:f.type||'application/octet-stream'});
-        const url=await getDownloadURL(r);
-        media.push({url,type:f.type.startsWith('image')?'image':f.type.startsWith('video')?'video':'audio'});
-      }catch(e){toast('❌ Ошибка загрузки файла');}
-    }
-    files=[]; g('chips').innerHTML='';
+    toast('⬆️ Загружаю файлы...');
+    try{
+      for(const f of files){
+        const kind=mediaKind(f); if(!kind)throw new Error(`Неизвестный тип файла: ${f.name}`);
+        const ext=(f.name.split('.').pop()||kind).replace(/[^a-z0-9]/gi,'').toLowerCase()||kind;
+        const path=`media/${me.uid}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+        const r=sr(st,path); await uploadBytes(r,f,{contentType:f.type||({image:'image/jpeg',video:'video/mp4',audio:'audio/mpeg'}[kind])});
+        const url=await getDownloadURL(r); media.push({url,type:kind});
+      }
+    }catch(e){console.error('Media upload failed',e);toast(`❌ Не удалось загрузить файл: ${e.code||e.message||'проверьте доступ к Firebase Storage'}`,6000);return;}
   }
   const path=curType==='general'?'messages/general':curType==='room'?`messages/rooms/${curCh}`:`messages/dms/${curCh}`;
   const data={uid:me.uid,sender:me.name,ts:Date.now(),text:txt};
   if(media.length)data.media=media;
   await push(ref(db,path),data);
+  files=[]; g('chips').innerHTML='';
   const prev=txt||'📎 файл';
   if(curType==='general'){const p=g('pg');if(p)p.textContent=prev;}
   else if(curType==='room')set(ref(db,`rooms/${curCh}/lastMessage`),prev);
@@ -584,19 +592,31 @@ function listenTyping(ch){
 // FILES
 window.hFiles=flist=>{
   for(const f of flist){
-    if(f.size>25*1024*1024){toast('❌ Файл больше 25MB');continue;}
+    if(!f)continue;
+    const kind=mediaKind(f);
+    if(!kind){toast(`❌ Формат файла не поддерживается: ${f.name||'файл'}`);continue;}
+    const limit=kind==='video'?100:25;
+    if(f.size>limit*1024*1024){toast(`❌ ${kind==='video'?'Видео':'Файл'} больше ${limit}MB`);continue;}
     files.push(f);
     const ch=document.createElement('div'); ch.className='chip';
-    const ico=f.type.startsWith('image')?'🖼️':f.type.startsWith('video')?'🎬':'🎵';
+    const ico=kind==='image'?'🖼️':kind==='video'?'🎬':'🎵';
     ch.innerHTML=`${ico} ${esc(f.name.slice(0,18))} <button class="cx" onclick="rmF(${files.length-1},this)">×</button>`;
     g('chips').appendChild(ch);
   }
   g('fi').value='';
 };
-g('mi').addEventListener('paste',e=>{
-  const items=[...(e.clipboardData?.items||[])];
-  const pasted=items.filter(x=>x.kind==='file'&&x.type.startsWith('image/')).map(x=>x.getAsFile()).filter(Boolean);
-  if(pasted.length){e.preventDefault();hFiles(pasted);}
+function mediaKind(file){
+  const mime=(file.type||'').toLowerCase(),ext=(file.name||'').split('.').pop().toLowerCase();
+  if(mime.startsWith('image/')||/^(png|jpe?g|gif|webp|avif|bmp|tiff?)$/.test(ext))return 'image';
+  if(mime.startsWith('video/')||/^(mp4|webm|ogg|mov|m4v|avi|mkv)$/.test(ext))return 'video';
+  if(mime.startsWith('audio/')||/^(mp3|wav|m4a|aac|flac|oga)$/.test(ext))return 'audio';
+  return '';
+}
+g('ca').addEventListener('paste',e=>{
+  const clip=e.clipboardData; if(!clip)return;
+  const pasted=[...clip.items].filter(x=>x.kind==='file'&&x.type.startsWith('image/')).map(x=>x.getAsFile()).filter(Boolean);
+  const chosen=pasted.length?pasted:[...clip.files].filter(f=>mediaKind(f)==='image');
+  if(chosen.length){e.preventDefault();e.stopPropagation();hFiles(chosen);toast(`🖼️ Изображение добавлено (${chosen.length})`);}
 });
 window.rmF=(i,btn)=>{files[i]=null;btn.parentElement.remove();files=files.filter(Boolean);};
 
